@@ -13,359 +13,48 @@ import NavigateBeforeIcon from "@mui/icons-material/NavigateBefore";
 import NavigateNextIcon from "@mui/icons-material/NavigateNext";
 import ReplayIcon from "@mui/icons-material/Replay";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import {
+  CHAPTERS,
+  HOST,
+  IMAGE_BYTES,
+  LAYERS,
+  LAYER_BY_ID,
+  QUIZ_COLOR,
+  SPLIT,
+  STEPS,
+  UDP_COLOR,
+  headerRows,
+  partStyle,
+  partTitle,
+  quizLabel,
+  senderOf,
+  type Layer,
+  type PartKind,
+  type Phase,
+  type Proto,
+  type Side,
+  type Step,
+  type Unit,
+} from "./model";
+import { NetworkMap, RouteTable } from "./NetworkMap";
+import { CIRCLED, MissingPiece, PhotoPiece, photoSlice, sliceOf } from "./photo";
+import { ChoiceQuizView, FinalTest, MissingQuiz, ProtocolTable, ReorderQuiz, RouterQuiz, SortQuiz, type TestState } from "./Quizzes";
 
-// ---------- モデル ----------
-
-type Side = "client" | "server";
-type Layer = "app" | "transport" | "internet" | "link";
-type Phase = "request" | "response";
-type PartKind = "eth" | "ip" | "tcp" | "data" | "fcs";
-
-const LAYERS: { id: Layer; name: string; osi: string; protocol: string; color: string }[] = [
-  { id: "app", name: "アプリケーション層", osi: "OSI 第5〜7層", protocol: "HTTP", color: "#1e88e5" },
-  { id: "transport", name: "トランスポート層", osi: "OSI 第4層", protocol: "TCP", color: "#43a047" },
-  { id: "internet", name: "インターネット層", osi: "OSI 第3層", protocol: "IP", color: "#fb8c00" },
-  { id: "link", name: "ネットワークインタフェース層", osi: "OSI 第1〜2層", protocol: "イーサネット", color: "#8e24aa" },
-];
-
-const LAYER_BY_ID = Object.fromEntries(LAYERS.map((l) => [l.id, l])) as Record<
-  Layer,
-  (typeof LAYERS)[number]
->;
-
-const PART_STYLE: Record<PartKind, { label: string; color: string }> = {
-  eth: { label: "Eth", color: LAYER_BY_ID.link.color },
-  ip: { label: "IP", color: LAYER_BY_ID.internet.color },
-  tcp: { label: "TCP", color: LAYER_BY_ID.transport.color },
-  data: { label: "データ", color: LAYER_BY_ID.app.color },
-  fcs: { label: "FCS", color: LAYER_BY_ID.link.color },
-};
-
-const HOST = {
-  client: { name: "スマホ（SNSアプリ）", short: "スマホ", icon: "📱", ip: "192.168.1.10", mac: "AA:AA:AA:11:11:11", port: 50000 },
-  server: { name: "Webサーバ（SNS）", short: "Webサーバ", icon: "🖥️", ip: "192.168.1.20", mac: "BB:BB:BB:22:22:22", port: 80 },
-} as const;
-
-const MSS = 1460;
-/** 説明のため、画像はとても小さいサイズにしている */
-const IMAGE_BYTES = 4000;
-const RESPONSE_BYTES = 200;
-
-interface Unit {
-  /** セグメント番号（分割されていない場合は null） */
-  no: number | null;
-  parts: PartKind[];
-  bytes: number;
-  seq: number;
-  checked?: boolean;
-}
-
-interface Step {
-  phase: Phase;
-  where: { side: Side; layer: Layer } | "wire";
-  title: string;
-  description: string;
-  units: Unit[];
-  /** 詳細表で強調するヘッダ */
-  focus?: PartKind;
-  checks?: string[];
-  /** 受信側で「ヘッダに書かれた宛先」と「自分のアドレス」を見比べる */
-  compare?: { label: string; header: string; mine: string; result: string };
-  /** ケーブル上での到着順（セグメント番号。0 は分割なし） */
-  arrival?: number[];
-}
-
-const HEADERS_ALL: PartKind[] = ["eth", "ip", "tcp", "data", "fcs"];
-const HEADERS_IP: PartKind[] = ["ip", "tcp", "data"];
-const HEADERS_TCP: PartKind[] = ["tcp", "data"];
-const DATA_ONLY: PartKind[] = ["data"];
-
-function segments(total: number): { bytes: number; seq: number }[] {
-  const result: { bytes: number; seq: number }[] = [];
-  for (let offset = 0; offset < total; offset += MSS) {
-    result.push({ bytes: Math.min(MSS, total - offset), seq: offset + 1 });
-  }
-  return result;
-}
-
-function withParts(units: Unit[], parts: PartKind[], checked = false): Unit[] {
-  return units.map((u) => ({ ...u, parts, checked }));
-}
-
-function buildSteps(): Step[] {
-  const image: Unit[] = [{ no: null, parts: DATA_ONLY, bytes: IMAGE_BYTES, seq: 1 }];
-  const split: Unit[] = segments(IMAGE_BYTES).map((s, i) => ({ no: i + 1, parts: DATA_ONLY, ...s }));
-  const arrival = [1, 3, 2];
-  const arrived = arrival.map((no) => split[no - 1]);
-  const reply: Unit[] = [{ no: null, parts: DATA_ONLY, bytes: RESPONSE_BYTES, seq: 1 }];
-  const s = HOST.server;
-  const c = HOST.client;
-
-  return [
-    // ---- 画像のアップロード（スマホ → SNSサーバ） ----
-    {
-      phase: "request",
-      where: { side: "client", layer: "app" },
-      title: "画像を投稿する",
-      description: `SNSアプリで写真を選んで「投稿」を押すと、アプリケーション層の HTTP が「この画像を保存してください」というリクエスト（POST /upload ＋ 画像データ）を作ります。画像の大きさは ${IMAGE_BYTES.toLocaleString()} バイトです（説明のため、とても小さな画像にしています）。`,
-      units: image,
-      focus: "data",
-    },
-    {
-      phase: "request",
-      where: { side: "client", layer: "transport" },
-      title: "画像を分割する（セグメント化）",
-      description: `一度に送れるデータの大きさには上限（MSS = ${MSS.toLocaleString()} バイト）があります。そのため、画像を ${split.length} つに切り分けます。写真をハサミで切って、何通かの封筒に分けて送るイメージです。`,
-      units: split,
-      focus: "data",
-    },
-    {
-      phase: "request",
-      where: { side: "client", layer: "transport" },
-      title: "それぞれにTCPヘッダを付ける",
-      description:
-        "切り分けたそれぞれに TCP ヘッダを付けます。TCP ヘッダの“あて先”はポート番号で、送信元はアプリのポート（50000）、宛先は Web サーバの Web サービスのポート（80）です。さらにシーケンス番号（画像の何バイト目からか）を書いておくので、受け取った側は元の順番に並べ直せます。",
-      units: withParts(split, HEADERS_TCP),
-      focus: "tcp",
-    },
-    {
-      phase: "request",
-      where: { side: "client", layer: "internet" },
-      title: "IPヘッダを付ける",
-      description: `どのコンピュータに届けるかを示す IP アドレス（送信元 ${c.ip} → 宛先 ${s.ip}）を IP ヘッダに書きます。${split.length} 個の「IPパケット」ができました。`,
-      units: withParts(split, HEADERS_IP),
-      focus: "ip",
-    },
-    {
-      phase: "request",
-      where: { side: "client", layer: "link" },
-      title: "イーサネットヘッダを付けて送信",
-      description:
-        "隣の機器に届けるための MAC アドレスをイーサネットヘッダに、誤り検出用の FCS を末尾に付けて「フレーム」にします。最後は 0 と 1 の信号として順番に送り出します。",
-      units: withParts(split, HEADERS_ALL),
-      focus: "eth",
-    },
-    {
-      phase: "request",
-      where: "wire",
-      title: "ネットワークを流れる（順番が入れ替わることも）",
-      description:
-        "パケットは別々の経路を通ることがあるので、送った順番どおりに届くとは限りません。ここでは ①→③→② の順に届きました。画像の切れ端がバラバラの順番で届いた状態です。",
-      units: withParts(arrived, HEADERS_ALL),
-      arrival,
-    },
-    {
-      phase: "request",
-      where: { side: "server", layer: "link" },
-      title: "宛先MACアドレスを確認",
-      description:
-        "受け取ったら、下の層から順に「自分あてか」を確認してヘッダを外していきます。まずフレームごとに宛先 MAC アドレスと FCS を確認します。",
-      units: withParts(arrived, HEADERS_ALL, true),
-      focus: "eth",
-      compare: { label: "MACアドレス", header: s.mac, mine: s.mac, result: "自分あてなので受け取る" },
-      checks: ["FCS で誤りなし → イーサネットヘッダと FCS を外す"],
-    },
-    {
-      phase: "request",
-      where: { side: "server", layer: "internet" },
-      title: "宛先IPアドレスを確認",
-      description: "IP ヘッダの宛先 IP アドレスが自分のものかを確認し、IP ヘッダを外します。",
-      units: withParts(arrived, HEADERS_IP, true),
-      focus: "ip",
-      compare: { label: "IPアドレス", header: s.ip, mine: s.ip, result: "自分あてなので IPヘッダを外す" },
-    },
-    {
-      phase: "request",
-      where: { side: "server", layer: "transport" },
-      title: "TCPヘッダを確認して並べ替える",
-      description:
-        "TCP ヘッダの宛先ポート番号を見て、どのアプリケーションに渡すかを決めます。さらにシーケンス番号を見て、届いた順（①③②）ではなく元の順番（①②③）に画像の切れ端を並べ替えます。",
-      units: withParts(split, HEADERS_TCP, true),
-      focus: "tcp",
-      compare: { label: "ポート番号", header: String(s.port), mine: `${s.port}（Webサービス）`, result: "Webサービスに渡すデータ" },
-      checks: [
-        `シーケンス番号 ${split.map((u) => u.seq).join(" → ")} の順に並べ替え`,
-        "受け取った分は確認応答（ACK）でスマホに知らせる",
-      ],
-    },
-    {
-      phase: "request",
-      where: { side: "server", layer: "transport" },
-      title: "画像を統合する",
-      description: `TCP ヘッダを外し、並べ替えた切れ端をつなげて、元の ${IMAGE_BYTES.toLocaleString()} バイトの画像に戻します。`,
-      units: image,
-      focus: "data",
-    },
-    {
-      phase: "request",
-      where: { side: "server", layer: "app" },
-      title: "画像を受け取って保存",
-      description: "Web サーバが HTTP リクエスト（POST /upload）と画像を受け取り、保存しました。次は「投稿できました」という返事（レスポンス）を送ります。",
-      units: image,
-      focus: "data",
-    },
-
-    // ---- 返事（SNSサーバ → スマホ） ----
-    {
-      phase: "response",
-      where: { side: "server", layer: "app" },
-      title: "「投稿完了」の返事を作る",
-      description: `Web サーバは「201 Created（投稿できました）」という HTTP レスポンスを作ります。大きさは ${RESPONSE_BYTES} バイトです。`,
-      units: reply,
-      focus: "data",
-    },
-    {
-      phase: "response",
-      where: { side: "server", layer: "transport" },
-      title: "TCPヘッダを付ける（分割は不要）",
-      description: `返事は ${RESPONSE_BYTES} バイトと小さいので、分割せずにそのまま TCP ヘッダを付けます。今度は送信元ポート 80 → 宛先ポート 50000 です。`,
-      units: withParts(reply, HEADERS_TCP),
-      focus: "tcp",
-    },
-    {
-      phase: "response",
-      where: { side: "server", layer: "internet" },
-      title: "IPヘッダを付ける",
-      description: `IP ヘッダ（送信元 ${s.ip} → 宛先 ${c.ip}）を付けます。行きとは送信元と宛先が入れ替わっています。`,
-      units: withParts(reply, HEADERS_IP),
-      focus: "ip",
-    },
-    {
-      phase: "response",
-      where: { side: "server", layer: "link" },
-      title: "イーサネットヘッダを付けて送信",
-      description: "フレームにして、0 と 1 の信号として送り出します。",
-      units: withParts(reply, HEADERS_ALL),
-      focus: "eth",
-    },
-    {
-      phase: "response",
-      where: "wire",
-      title: "ネットワークを流れる",
-      description: "返事のフレームがスマホに向かって流れていきます。",
-      units: withParts(reply, HEADERS_ALL),
-      arrival: [0],
-    },
-    {
-      phase: "response",
-      where: { side: "client", layer: "link" },
-      title: "宛先MACアドレスを確認",
-      description: "スマホは宛先 MAC アドレスと FCS を確認して、イーサネットヘッダを外します。",
-      units: withParts(reply, HEADERS_ALL, true),
-      focus: "eth",
-      compare: { label: "MACアドレス", header: c.mac, mine: c.mac, result: "自分あてなので受け取る" },
-    },
-    {
-      phase: "response",
-      where: { side: "client", layer: "internet" },
-      title: "宛先IPアドレスを確認",
-      description: "IP ヘッダの宛先 IP アドレスを確認して、IP ヘッダを外します。",
-      units: withParts(reply, HEADERS_IP, true),
-      focus: "ip",
-      compare: { label: "IPアドレス", header: c.ip, mine: c.ip, result: "自分あてなので IPヘッダを外す" },
-    },
-    {
-      phase: "response",
-      where: { side: "client", layer: "transport" },
-      title: "TCPヘッダの宛先ポートを確認",
-      description: "宛先ポート番号 50000 を見て、この返事を SNS アプリに渡します。",
-      units: withParts(reply, HEADERS_TCP, true),
-      focus: "tcp",
-      compare: { label: "ポート番号", header: String(c.port), mine: `${c.port}（SNSアプリ）`, result: "SNSアプリに渡す" },
-    },
-    {
-      phase: "response",
-      where: { side: "client", layer: "app" },
-      title: "「投稿しました」と表示",
-      description:
-        "SNS アプリが HTTP レスポンス（201 Created）を受け取り、画面に「投稿しました」と表示します。これで画像のアップロードが完了です。",
-      units: reply,
-      focus: "data",
-    },
-  ];
-}
-
-const STEPS = buildSteps();
-
-function headerRows(kind: PartKind, phase: Phase, unit: Unit): [string, string][] {
-  const src = phase === "request" ? HOST.client : HOST.server;
-  const dst = phase === "request" ? HOST.server : HOST.client;
-  switch (kind) {
-    case "eth":
-      return [
-        ["宛先MAC", dst.mac],
-        ["送信元MAC", src.mac],
-      ];
-    case "ip":
-      return [
-        ["送信元IP", src.ip],
-        ["宛先IP", dst.ip],
-      ];
-    case "tcp":
-      return [
-        ["送信元ポート", String(src.port)],
-        ["宛先ポート", String(dst.port)],
-        ["シーケンス番号", String(unit.seq)],
-      ];
-    case "data":
-      return [
-        [
-          "内容",
-          phase === "response"
-            ? "HTTP/1.1 201 Created"
-            : unit.no
-              ? `画像の ${unit.seq.toLocaleString()}〜${(unit.seq + unit.bytes - 1).toLocaleString()} バイト目`
-              : "POST /upload ＋ 画像（photo.jpg）",
-        ],
-        ["大きさ", `${unit.bytes.toLocaleString()} バイト`],
-      ];
-    case "fcs":
-      return [["誤り検出用の値", "（受信側で計算して照合）"]];
-  }
-}
-
-// ---------- 画像（例えの写真） ----------
-
-const PHOTO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200" preserveAspectRatio="none">
-<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fa3e0"/><stop offset="1" stop-color="#bfe3f7"/></linearGradient></defs>
-<rect width="300" height="200" fill="url(#s)"/>
-<circle cx="230" cy="48" r="22" fill="#ffd54f"/>
-<path d="M0 130 L70 60 L120 110 L170 50 L240 125 L300 90 L300 200 L0 200 Z" fill="#5d8a5e"/>
-<path d="M150 72 L170 50 L188 70 Z M55 75 L70 60 L84 74 Z" fill="#ffffff"/>
-<path d="M0 150 Q150 135 300 150 L300 200 L0 200 Z" fill="#2e7dbf"/>
-<path d="M0 175 Q150 165 300 178 L300 200 L0 200 Z" fill="#c8a165"/>
-</svg>`;
-const PHOTO_URL = `url("data:image/svg+xml,${encodeURIComponent(PHOTO_SVG)}")`;
-
-/** 画像の a〜b（0〜1 の割合）の横帯を背景として表示するスタイル */
-function photoSlice(a: number, b: number) {
-  const h = b - a;
-  return {
-    backgroundImage: PHOTO_URL,
-    backgroundRepeat: "no-repeat",
-    backgroundSize: `100% ${100 / h}%`,
-    backgroundPosition: `0 ${h >= 1 ? 0 : (a / (1 - h)) * 100}%`,
-  };
-}
-
-function sliceOf(unit: Unit) {
-  return { a: (unit.seq - 1) / IMAGE_BYTES, b: (unit.seq - 1 + unit.bytes) / IMAGE_BYTES };
-}
-
-const CIRCLED = ["①", "②", "③", "④", "⑤"];
+// ---------- 写真 ----------
 
 function PhotoView({ step }: { step: Step }) {
+  if (step.photo === false) return null;
   const pieces = step.units.filter((u) => u.no !== null);
+  const missing = step.photo?.missing;
   const done = step.phase === "response";
-  const caption = done
-    ? "Webサーバに保存された画像"
-    : pieces.length === 0
-      ? step.where !== "wire" && step.where.side === "server"
-        ? "元どおりにつながった画像"
-        : "投稿する画像（photo.jpg）"
-      : step.where === "wire"
-        ? "届いた順番（バラバラ）"
-        : "切り分けた画像";
+  const caption = step.photo?.caption ?? (pieces.length === 0 ? "投稿する画像（photo.jpg）" : "切り分けた画像");
+
+  // 欠けている切れ端は、本来の位置に「届いていない」として表示する
+  const shown: { unit: Unit; missing: boolean }[] = pieces.map((u) => ({ unit: u, missing: false }));
+  if (missing) {
+    const at = shown.findIndex((p) => p.unit.no! > missing);
+    shown.splice(at === -1 ? shown.length : at, 0, { unit: SPLIT[missing - 1], missing: true });
+  }
 
   return (
     <Box>
@@ -377,63 +66,24 @@ function PhotoView({ step }: { step: Step }) {
           <Box sx={{ aspectRatio: "3 / 2", borderRadius: 1.5, boxShadow: 2, ...photoSlice(0, 1) }} />
         ) : (
           <Stack spacing={0.5}>
-            {pieces.map((u) => {
-              const { a, b } = sliceOf(u);
-              return (
-                <Box
-                  key={u.no}
-                  sx={{
-                    position: "relative",
-                    aspectRatio: `3 / ${2 * (b - a)}`,
-                    borderRadius: 1,
-                    boxShadow: 2,
-                    outline: "2px dashed #fff",
-                    outlineOffset: -3,
-                    transition: "all 0.4s",
-                    ...photoSlice(a, b),
-                  }}
-                >
-                  <Box
-                    sx={{
-                      position: "absolute",
-                      left: 6,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      bgcolor: "rgba(0,0,0,0.55)",
-                      color: "#fff",
-                      borderRadius: 1,
-                      px: 0.75,
-                      fontWeight: 700,
-                      fontSize: "0.85rem",
-                    }}
-                  >
-                    {CIRCLED[u.no! - 1]}
-                  </Box>
-                </Box>
-              );
-            })}
+            {shown.map((p) => (p.missing ? <MissingPiece key={`m${p.unit.no}`} unit={p.unit} /> : <PhotoPiece key={p.unit.no} unit={p.unit} />))}
           </Stack>
         )}
         {done && (
-          <Chip
-            icon={<CheckCircleIcon />}
-            label="保存済み"
-            color="success"
-            size="small"
-            sx={{ position: "absolute", top: 8, left: 8 }}
-          />
+          <Chip icon={<CheckCircleIcon />} label="保存済み" color="success" size="small" sx={{ position: "absolute", top: 8, left: 8 }} />
         )}
       </Box>
     </Box>
   );
 }
 
-// ---------- 表示部品 ----------
+// ---------- 層の図 ----------
 
 function LayerStack({ side, step }: { side: Side; step: Step }) {
   const host = HOST[side];
   const active = step.where !== "wire" && step.where.side === side ? step.where.layer : null;
   const sending = (step.phase === "request") === (side === "client");
+  const proto: Proto = step.proto ?? "tcp";
 
   return (
     <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -498,16 +148,18 @@ function LayerStack({ side, step }: { side: Side; step: Step }) {
       <Stack spacing={0.75}>
         {LAYERS.map((layer) => {
           const isActive = active === layer.id;
+          const isUdp = layer.id === "transport" && proto === "udp";
+          const color = isUdp ? UDP_COLOR : layer.color;
           return (
             <Box
               key={layer.id}
               sx={{
                 border: 2,
-                borderColor: layer.color,
+                borderColor: color,
                 borderRadius: 2,
                 px: 1,
                 py: 0.4,
-                bgcolor: isActive ? layer.color : "background.paper",
+                bgcolor: isActive ? color : "background.paper",
                 color: isActive ? "#fff" : "text.primary",
                 boxShadow: isActive ? 4 : 0,
                 transform: isActive ? "scale(1.04)" : "none",
@@ -518,7 +170,7 @@ function LayerStack({ side, step }: { side: Side; step: Step }) {
                 {layer.name}
               </Typography>
               <Typography variant="caption" sx={{ opacity: 0.85, fontSize: { xs: "0.62rem", sm: "0.7rem" } }}>
-                {layer.protocol}・{layer.osi}
+                {isUdp ? "UDP" : layer.protocol}・{layer.osi}
               </Typography>
             </Box>
           );
@@ -532,18 +184,20 @@ const travelRight = keyframes`
   from { left: 0%; opacity: 0; }
   10% { opacity: 1; }
   90% { opacity: 1; }
-  to { left: calc(100% - 28px); opacity: 0; }
+  to { left: calc(100% - 36px); opacity: 0; }
 `;
 const travelLeft = keyframes`
-  from { left: calc(100% - 28px); opacity: 0; }
+  from { left: calc(100% - 36px); opacity: 0; }
   10% { opacity: 1; }
   90% { opacity: 1; }
   to { left: 0%; opacity: 0; }
 `;
 
 function Wire({ step, stepIndex }: { step: Step; stepIndex: number }) {
-  const toRight = step.phase === "request";
-  const active = step.where === "wire";
+  const wire = step.wire;
+  const toRight = wire ? wire.dir === "right" : step.phase === "request";
+  const active = Boolean(wire);
+  const color = LAYER_BY_ID.link.color;
   return (
     <Box sx={{ width: { xs: 52, sm: 96 }, flexShrink: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", pb: 1 }}>
       <Typography variant="caption" textAlign="center" color="text.secondary" mb={0.5}>
@@ -559,42 +213,42 @@ function Wire({ step, stepIndex }: { step: Step; stepIndex: number }) {
             height: 4,
             mt: "-2px",
             borderRadius: 2,
-            bgcolor: active ? LAYER_BY_ID.link.color : "grey.400",
+            bgcolor: active ? color : "grey.400",
           }}
         />
-        {active &&
-          step.arrival!.map((no, i) => (
-            <Box
-              key={`${stepIndex}-${i}`}
-              sx={{
-                position: "absolute",
-                top: 4,
-                width: 28,
-                height: 28,
-                borderRadius: 1,
-                bgcolor: LAYER_BY_ID.link.color,
-                color: "#fff",
-                fontSize: "0.8rem",
-                fontWeight: 700,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                opacity: 0,
-                animation: `${toRight ? travelRight : travelLeft} 1.6s ease-in-out ${i * 0.7}s infinite`,
-              }}
-            >
-              {no === 0 ? "✉️" : CIRCLED[no - 1]}
-            </Box>
-          ))}
+        {wire?.items.map((label, i) => (
+          <Box
+            key={`${stepIndex}-${i}`}
+            sx={{
+              position: "absolute",
+              top: 4,
+              minWidth: 28,
+              height: 28,
+              px: 0.5,
+              borderRadius: 1,
+              bgcolor: color,
+              color: "#fff",
+              fontSize: "0.75rem",
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              opacity: 0,
+              animation: `${toRight ? travelRight : travelLeft} 1.6s ease-in-out ${i * 0.7}s infinite`,
+            }}
+          >
+            {label}
+          </Box>
+        ))}
       </Box>
-      <Typography variant="caption" textAlign="center" fontSize="1.2rem" color={active ? LAYER_BY_ID.link.color : "grey.400"}>
+      <Typography variant="caption" textAlign="center" fontSize="1.2rem" color={active ? color : "grey.400"}>
         {toRight ? "➡" : "⬅"}
       </Typography>
     </Box>
   );
 }
 
-function UnitBar({ unit, phase, selected, onSelect }: { unit: Unit; phase: Phase; selected: boolean; onSelect: () => void }) {
+function UnitBar({ unit, phase, proto, selected, onSelect }: { unit: Unit; phase: Phase; proto: Proto; selected: boolean; onSelect: () => void }) {
   const isImage = phase === "request";
   const dataWidth = Math.max(18, (unit.bytes / IMAGE_BYTES) * 100);
   const { a, b } = sliceOf(unit);
@@ -619,7 +273,7 @@ function UnitBar({ unit, phase, selected, onSelect }: { unit: Unit; phase: Phase
       </Typography>
       <Box sx={{ display: "flex", flex: 1, minWidth: 0, height: 30 }}>
         {unit.parts.map((p) => {
-          const st = PART_STYLE[p];
+          const st = partStyle(p, proto);
           const isData = p === "data";
           return (
             <Box
@@ -686,7 +340,7 @@ function CompareBox({ compare }: { compare: NonNullable<Step["compare"]> }) {
   );
 }
 
-/** 各ステップで高さが変わらないよう、最も高くなるステップに合わせた最小の高さ（px） */
+/** 各ステップで高さが変わりにくいよう、層の図のステップに合わせた最小の高さ（px） */
 const TOP_MIN_MD = 545;
 const TOP_MIN_LG = 455;
 const DATA_MIN_XS = 632;
@@ -696,13 +350,9 @@ const DATA_MIN_LG = 280;
 const MAX_UNITS = Math.max(...STEPS.map((s) => s.units.length));
 const DETAIL_KINDS: PartKind[] = ["eth", "ip", "tcp", "data"];
 
-function senderOf(phase: Phase): Side {
-  return phase === "request" ? "client" : "server";
-}
+const chapterOf = (step: Step) => CHAPTERS.find((c) => c.id === step.chapter)!;
 
 // ---------- スライド送り（操作バー） ----------
-
-const REPLY_START = STEPS.findIndex((s) => s.phase === "response");
 
 const slideFromRight = keyframes`
   from { opacity: 0; transform: translateX(40px); }
@@ -715,10 +365,13 @@ const slideFromLeft = keyframes`
 
 interface SlideNavProps {
   index: number;
+  canNext: boolean;
+  /** スライドのクリックで次へ進めるか（問題のスライドでは進まない） */
+  clickable: boolean;
   onSeek: (index: number) => void;
 }
 
-function SlideNav({ index, onSeek }: SlideNavProps) {
+function SlideNav({ index, canNext, clickable, onSeek }: SlideNavProps) {
   const isFirst = index === 0;
   const isLast = index === STEPS.length - 1;
   const navButtonSx = { minWidth: 0, px: { xs: 1.5, sm: 2.5 }, py: 1, fontWeight: 700, borderRadius: 2, whiteSpace: "nowrap" };
@@ -748,19 +401,21 @@ function SlideNav({ index, onSeek }: SlideNavProps) {
         </Button>
 
         <Stack flex={1} minWidth={0} alignItems="center" spacing={0.5}>
-          {/* スライド一覧（クリックでそのスライドへ） */}
-          <Stack direction="row" alignItems="center" justifyContent="center" sx={{ display: { xs: "none", sm: "flex" }, gap: 0.75 }}>
+          {/* スライド一覧（クリックでそのスライドへ）。四角は問題のスライド */}
+          <Stack direction="row" alignItems="center" justifyContent="center" sx={{ display: { xs: "none", sm: "flex" }, gap: 0.6 }}>
             {STEPS.map((s, i) => {
-              const color = s.phase === "request" ? "#1e88e5" : "#8e24aa";
+              const color = chapterOf(s).color;
               const current = i === index;
+              const quiz = quizLabel(s.quiz);
+              const newChapter = i > 0 && STEPS[i - 1].chapter !== s.chapter;
               return (
                 <Box
                   key={i}
                   component="button"
                   type="button"
-                  aria-label={`スライド ${i + 1}：${s.title}`}
+                  aria-label={`スライド ${i + 1}：${quiz ? `${quiz}・` : ""}${s.title}`}
                   aria-current={current ? "step" : undefined}
-                  title={`${i + 1}. ${s.title}`}
+                  title={`${i + 1}. ${quiz ? `【${quiz}】` : ""}${s.title}`}
                   onClick={() => onSeek(i)}
                   sx={{
                     p: 0,
@@ -768,22 +423,34 @@ function SlideNav({ index, onSeek }: SlideNavProps) {
                     cursor: "pointer",
                     width: current ? 22 : 10,
                     height: 10,
-                    borderRadius: 5,
+                    borderRadius: quiz ? "2px" : 5,
                     bgcolor: color,
-                    opacity: current ? 1 : i < index ? 0.55 : 0.2,
+                    opacity: current ? 1 : i < index ? 0.55 : 0.22,
                     transition: "width 0.2s, opacity 0.2s",
-                    ml: i === REPLY_START ? 1.5 : 0,
+                    ml: newChapter ? 1.25 : 0,
                     "&:hover": { opacity: current ? 1 : 0.8 },
                   }}
                 />
               );
             })}
           </Stack>
-          <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums", lineHeight: 1.2 }}>
+          <Typography variant="caption" color={canNext ? "text.secondary" : "error"} sx={{ fontVariantNumeric: "tabular-nums", lineHeight: 1.2, textAlign: "center", fontWeight: canNext ? 400 : 700 }}>
             スライド {index + 1} / {STEPS.length}
-            <Box component="span" sx={{ display: { xs: "none", md: "inline" } }}>
-              　·　画面をクリックしても次へ進みます
-            </Box>
+            {!canNext ? (
+              <>
+                　·　
+                <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                  問題に
+                </Box>
+                答えると次へ進めます
+              </>
+            ) : (
+              clickable && (
+                <Box component="span" sx={{ display: { xs: "none", md: "inline" } }}>
+                  　·　画面をクリックしても次へ進みます
+                </Box>
+              )
+            )}
           </Typography>
         </Stack>
 
@@ -792,7 +459,14 @@ function SlideNav({ index, onSeek }: SlideNavProps) {
             最初から
           </Button>
         ) : (
-          <Button variant="contained" onClick={() => onSeek(index + 1)} endIcon={<NavigateNextIcon />} title="次のスライド（→キー）" sx={navButtonSx}>
+          <Button
+            variant="contained"
+            onClick={() => onSeek(index + 1)}
+            disabled={!canNext}
+            endIcon={<NavigateNextIcon />}
+            title="次のスライド（→キー）"
+            sx={navButtonSx}
+          >
             次へ
           </Button>
         )}
@@ -807,13 +481,23 @@ export default function NetworkSimulator() {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState(0);
   const [direction, setDirection] = useState<1 | -1>(1);
+  /** 選択問題の答え（スライド番号 → 選んだ選択肢） */
+  const [answers, setAnswers] = useState<Record<number, number>>({});
+  const [test, setTest] = useState<TestState>({ answers: [], graded: false, name: "" });
 
   const step = STEPS[index];
   const unit = step.units[Math.min(selected, step.units.length - 1)];
+  const proto: Proto = step.proto ?? "tcp";
+  const chapter = chapterOf(step);
+  const label = quizLabel(step.quiz);
+  const stage = step.stage ?? "layers";
+  const canNext = !(step.quiz?.kind === "choice" && step.quiz.gate && answers[index] === undefined);
 
   const go = (next: number) => {
     const clamped = Math.max(0, Math.min(STEPS.length - 1, next));
     if (clamped === index) return;
+    // 予想問題は答えるまで先へ進めない
+    if (clamped > index && !canNext) return;
     setDirection(clamped > index ? 1 : -1);
     setIndex(clamped);
     setSelected(0);
@@ -823,7 +507,7 @@ export default function NetworkSimulator() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && e.target.closest("input, textarea")) return;
-      const onButton = e.target instanceof HTMLElement && e.target.closest("button");
+      const onButton = e.target instanceof HTMLElement && e.target.closest("button, [role=button]");
       let next: number;
       if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "PageDown") next = index + 1;
       else if ((e.key === " " || e.key === "Enter") && !onButton) next = index + 1;
@@ -838,8 +522,9 @@ export default function NetworkSimulator() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // スライド部分をクリック・タップすると次へ（ボタンなど操作できる部品は除く）
+  // スライド部分をクリック・タップすると次へ（問題のスライドと、ボタンなど操作できる部品は除く）
   const advanceOnClick = (e: MouseEvent) => {
+    if (step.quiz) return;
     if (e.target instanceof HTMLElement && e.target.closest("button, a, input, [role=button]")) return;
     if (window.getSelection()?.toString()) return;
     go(index + 1);
@@ -847,8 +532,8 @@ export default function NetworkSimulator() {
 
   const location =
     step.where === "wire"
-      ? "ネットワーク"
-      : `${HOST[step.where.side].short}・${LAYER_BY_ID[step.where.layer].name}`;
+      ? "ネットワーク（ルータ）"
+      : `${HOST[step.where.side].short}・${step.where.layer === "transport" && proto === "udp" ? "トランスポート層（UDP）" : LAYER_BY_ID[step.where.layer].name}`;
   const receiving = step.where !== "wire" && step.where.side !== senderOf(step.phase);
 
   return (
@@ -858,7 +543,7 @@ export default function NetworkSimulator() {
         key={index}
         onClick={advanceOnClick}
         sx={{
-          cursor: index < STEPS.length - 1 ? "pointer" : "default",
+          cursor: step.quiz || index === STEPS.length - 1 ? "default" : "pointer",
           animation: `${direction === 1 ? slideFromRight : slideFromLeft} 0.35s ease-out`,
           display: "grid",
           gridTemplateColumns: { xs: "1fr", md: "minmax(0, 1.15fr) minmax(0, 1fr)" },
@@ -870,33 +555,59 @@ export default function NetworkSimulator() {
       >
         <Card sx={{ borderRadius: 3 }}>
           <CardContent>
-            <Stack direction="row" spacing={1} mb={2} justifyContent="center" flexWrap="wrap" useFlexGap>
-              <Chip
-                size="small"
-                label="① 画像をアップロード：スマホ → Webサーバ"
-                color={step.phase === "request" ? "primary" : "default"}
-                variant={step.phase === "request" ? "filled" : "outlined"}
-              />
-              <Chip
-                size="small"
-                label="② 返事：Webサーバ → スマホ"
-                color={step.phase === "response" ? "secondary" : "default"}
-                variant={step.phase === "response" ? "filled" : "outlined"}
-              />
+            {/* 章の目次 */}
+            <Stack direction="row" spacing={0.75} mb={2} justifyContent="center" flexWrap="wrap" useFlexGap>
+              {CHAPTERS.map((c) => {
+                const on = c.id === step.chapter;
+                return (
+                  <Chip
+                    key={c.id}
+                    size="small"
+                    label={`${c.id}. ${c.name}`}
+                    sx={{
+                      fontWeight: 700,
+                      bgcolor: on ? c.color : "transparent",
+                      color: on ? "#fff" : "text.secondary",
+                      border: `1px solid ${on ? c.color : "#cfd8dc"}`,
+                    }}
+                  />
+                );
+              })}
             </Stack>
-            <Box sx={{ display: "flex", alignItems: "stretch", gap: { xs: 0.5, sm: 1 } }}>
-              <LayerStack side="client" step={step} />
-              <Wire step={step} stepIndex={index} />
-              <LayerStack side="server" step={step} />
-            </Box>
+
+            {stage === "layers" && (
+              <Box sx={{ display: "flex", alignItems: "stretch", gap: { xs: 0.5, sm: 1 } }}>
+                <LayerStack side="client" step={step} />
+                <Wire step={step} stepIndex={index} />
+                <LayerStack side="server" step={step} />
+              </Box>
+            )}
+            {stage === "map" && step.map && (
+              <Stack spacing={1.5}>
+                <NetworkMap {...step.map} lit={step.map.parked?.some((p) => p.at === "a") ? [["s", "a"]] : []} />
+                {step.map.table && <RouteTable router={step.map.table.router} hit={step.map.table.hit} />}
+              </Stack>
+            )}
+            {stage === "router" && <RouterQuiz />}
+            {stage === "sort" && <SortQuiz />}
+            {stage === "test" && <FinalTest state={test} onChange={setTest} onSeek={go} />}
           </CardContent>
         </Card>
 
         <Card sx={{ borderRadius: 3, display: "flex", flexDirection: "column" }}>
           <CardContent sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
-            <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-              ステップ {index + 1} / {STEPS.length}　|　{location}
-            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center" mb={0.5} flexWrap="wrap" useFlexGap>
+              {label && (
+                <Chip
+                  size="small"
+                  label={label}
+                  sx={{ fontWeight: 700, color: QUIZ_COLOR[label], border: `2px solid ${QUIZ_COLOR[label]}`, bgcolor: "transparent" }}
+                />
+              )}
+              <Typography variant="caption" color="text.secondary">
+                第{chapter.id}章　|　{location}
+              </Typography>
+            </Stack>
             <Typography variant="h6" fontWeight={700} mb={0.5} sx={{ fontSize: "1.1rem" }}>
               {step.title}
             </Typography>
@@ -904,9 +615,11 @@ export default function NetworkSimulator() {
               <Typography variant="body2" sx={{ lineHeight: 1.7, fontSize: "0.92rem", flex: 1, minWidth: 0 }}>
                 {step.description}
               </Typography>
-              <Box sx={{ width: { xs: 150, sm: 150 }, flexShrink: 0 }}>
-                <PhotoView step={step} />
-              </Box>
+              {step.photo !== false && (
+                <Box sx={{ width: { xs: 150, sm: 150 }, flexShrink: 0 }}>
+                  <PhotoView step={step} />
+                </Box>
+              )}
             </Stack>
             {step.compare && <CompareBox compare={step.compare} />}
             {step.checks && (
@@ -921,109 +634,118 @@ export default function NetworkSimulator() {
                 ))}
               </Paper>
             )}
-
+            {step.protocolTable && <ProtocolTable />}
+            {step.quiz && ["choice", "missing", "reorder"].includes(step.quiz.kind) && (
+              <Paper variant="outlined" sx={{ mt: 1.5, p: 1.5, borderWidth: 2, borderColor: QUIZ_COLOR[label!] }}>
+                {step.quiz.kind === "choice" && (
+                  <ChoiceQuizView quiz={step.quiz} value={answers[index]} onAnswer={(v) => setAnswers({ ...answers, [index]: v })} />
+                )}
+                {step.quiz.kind === "missing" && <MissingQuiz />}
+                {step.quiz.kind === "reorder" && <ReorderQuiz />}
+              </Paper>
+            )}
           </CardContent>
         </Card>
       </Box>
 
       {/* データの中身（高さ固定） */}
-      <Card sx={{ borderRadius: 3, minHeight: { xs: DATA_MIN_XS, md: DATA_MIN_MD, lg: DATA_MIN_LG } }}>
-        <CardContent>
-          <Box
-            sx={{
-              display: "grid",
-              gridTemplateColumns: { xs: "1fr", md: "minmax(0, 1.15fr) minmax(0, 1fr)" },
-              gap: 2,
-            }}
-          >
-            <Box>
-              <Typography fontWeight={700}>
-                📦 いまのデータ（{step.units.length > 1 ? `${step.units.length}個に分割` : "1個"}）
-              </Typography>
-              <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                クリックすると、そのデータのヘッダの中身を表示します
-              </Typography>
-              <Stack spacing={0.5}>
-                {step.units.map((u, i) => (
-                  <UnitBar key={`${index}-${i}`} unit={u} phase={step.phase} selected={u === unit} onSelect={() => setSelected(i)} />
-                ))}
-                {/* 行数が変わっても高さが変わらないよう、空き行を確保する */}
-                {Array.from({ length: MAX_UNITS - step.units.length }, (_, i) => (
-                  <Box key={`blank-${i}`} sx={{ height: 38 }} />
-                ))}
-              </Stack>
+      {!step.hideData && (
+        <Card sx={{ borderRadius: 3, minHeight: { xs: DATA_MIN_XS, md: DATA_MIN_MD, lg: DATA_MIN_LG } }}>
+          <CardContent>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr", md: "minmax(0, 1.15fr) minmax(0, 1fr)" },
+                gap: 2,
+              }}
+            >
+              <Box>
+                <Typography fontWeight={700}>
+                  📦 いまのデータ（{step.units.length > 1 ? `${step.units.length}個` : "1個"}）
+                </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+                  クリックすると、そのデータのヘッダの中身を表示します
+                </Typography>
+                <Stack spacing={0.5}>
+                  {step.units.map((u, i) => (
+                    <UnitBar key={`${index}-${i}`} unit={u} phase={step.phase} proto={proto} selected={u === unit} onSelect={() => setSelected(i)} />
+                  ))}
+                  {/* 行数が変わっても高さが変わらないよう、空き行を確保する */}
+                  {Array.from({ length: MAX_UNITS - step.units.length }, (_, i) => (
+                    <Box key={`blank-${i}`} sx={{ height: 38 }} />
+                  ))}
+                </Stack>
 
-              <Stack direction="row" spacing={1} mt={1.5} flexWrap="wrap" useFlexGap>
-                {(["eth", "ip", "tcp", "data"] as PartKind[]).map((p) => (
-                  <Stack key={p} direction="row" spacing={0.5} alignItems="center">
-                    <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: PART_STYLE[p].color }} />
-                    <Typography variant="caption">
-                      {p === "eth" ? "イーサネットヘッダ / FCS" : p === "data" ? "データ（HTTP）" : `${PART_STYLE[p].label}ヘッダ`}
-                    </Typography>
-                  </Stack>
-                ))}
-              </Stack>
-            </Box>
+                <Stack direction="row" spacing={1} mt={1.5} flexWrap="wrap" useFlexGap>
+                  {(["eth", "ip", "tcp", "data"] as PartKind[]).map((p) => (
+                    <Stack key={p} direction="row" spacing={0.5} alignItems="center">
+                      <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: partStyle(p, proto).color }} />
+                      <Typography variant="caption">{p === "eth" ? "イーサネットヘッダ / FCS" : partTitle(p, proto)}</Typography>
+                    </Stack>
+                  ))}
+                </Stack>
+              </Box>
 
-            <Box>
-              <Typography fontWeight={700}>✉️ ヘッダに書かれている内容</Typography>
-              <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                選んだデータに付いているヘッダです（上の「🪪 自分のアドレス」とは別のものです）
-              </Typography>
-              <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1 }}>
-              {DETAIL_KINDS.map((kind) => {
-                const present = unit.parts.includes(kind);
-                const focused = present && step.focus === kind;
-                const color = PART_STYLE[kind].color;
-                return (
-                  <Paper
-                    key={kind}
-                    variant="outlined"
-                    sx={{
-                      px: 1,
-                      py: 0.75,
-                      borderWidth: focused ? 3 : 1,
-                      borderColor: focused ? color : "divider",
-                      borderStyle: present ? "solid" : "dashed",
-                      boxShadow: focused ? 3 : 0,
-                      opacity: present ? 1 : 0.45,
-                    }}
-                  >
-                    <Typography variant="body2" fontWeight={700} sx={{ color, fontSize: "0.82rem" }} mb={0.25}>
-                      {kind === "eth" ? "イーサネットヘッダ" : kind === "data" ? "データ（HTTP）" : `${PART_STYLE[kind].label}ヘッダ`}
-                      {focused && " ← 注目"}
-                      {!present && (
-                        <Box component="span" sx={{ color: "text.secondary", fontWeight: 600 }}>
-                          {receiving ? "（外した）" : "（まだ付いていない）"}
-                        </Box>
-                      )}
-                    </Typography>
-                    {headerRows(kind, step.phase, unit).map(([k, v]) => (
-                      <Stack
-                        key={k}
-                        direction={{ xs: "column", sm: "row" }}
-                        justifyContent="space-between"
-                        alignItems={{ xs: "flex-start", sm: "baseline" }}
-                        columnGap={1}
+              <Box>
+                <Typography fontWeight={700}>✉️ ヘッダに書かれている内容</Typography>
+                <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+                  選んだデータに付いているヘッダです（上の「🪪 自分のアドレス」とは別のものです）
+                </Typography>
+                <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1 }}>
+                  {DETAIL_KINDS.map((kind) => {
+                    const present = unit.parts.includes(kind);
+                    const focused = present && step.focus === kind;
+                    const color = partStyle(kind, proto).color;
+                    return (
+                      <Paper
+                        key={kind}
+                        variant="outlined"
+                        sx={{
+                          px: 1,
+                          py: 0.75,
+                          borderWidth: focused ? 3 : 1,
+                          borderColor: focused ? color : "divider",
+                          borderStyle: present ? "solid" : "dashed",
+                          boxShadow: focused ? 3 : 0,
+                          opacity: present ? 1 : 0.45,
+                        }}
                       >
-                        <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.7rem", sm: "0.8rem" }, whiteSpace: "nowrap" }}>
-                          {k}
+                        <Typography variant="body2" fontWeight={700} sx={{ color, fontSize: "0.82rem" }} mb={0.25}>
+                          {partTitle(kind, proto)}
+                          {focused && " ← 注目"}
+                          {!present && (
+                            <Box component="span" sx={{ color: "text.secondary", fontWeight: 600 }}>
+                              {receiving ? "（外した）" : "（まだ付いていない）"}
+                            </Box>
+                          )}
                         </Typography>
-                        <Typography variant="body2" fontWeight={600} sx={{ fontFamily: "monospace", fontSize: { xs: "0.72rem", sm: "0.8rem" }, textAlign: { sm: "right" }, overflowWrap: "anywhere" }}>
-                          {present ? v : "—"}
-                        </Typography>
-                      </Stack>
-                    ))}
-                  </Paper>
-                );
-              })}
+                        {headerRows(kind, step, unit).map(([k, v]) => (
+                          <Stack
+                            key={k}
+                            direction={{ xs: "column", sm: "row" }}
+                            justifyContent="space-between"
+                            alignItems={{ xs: "flex-start", sm: "baseline" }}
+                            columnGap={1}
+                          >
+                            <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.7rem", sm: "0.8rem" }, whiteSpace: "nowrap" }}>
+                              {k}
+                            </Typography>
+                            <Typography variant="body2" fontWeight={600} sx={{ fontFamily: "monospace", fontSize: { xs: "0.72rem", sm: "0.8rem" }, textAlign: { sm: "right" }, overflowWrap: "anywhere" }}>
+                              {present ? v : "—"}
+                            </Typography>
+                          </Stack>
+                        ))}
+                      </Paper>
+                    );
+                  })}
+                </Box>
               </Box>
             </Box>
-          </Box>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      <SlideNav index={index} onSeek={go} />
+      <SlideNav index={index} canNext={canNext} clickable={!step.quiz} onSeek={go} />
     </Stack>
   );
 }
