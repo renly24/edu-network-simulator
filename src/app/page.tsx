@@ -12,7 +12,7 @@ export default function Home() {
             🌐 ブラウザとWebサーバの通信
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            SNSに画像を投稿するとき、データがどう分割・確認・統合されるかをTCP/IPの4つの層で見てみよう
+            SNSに画像を投稿するとき、データがパケットに分けられ、ルータをたどって届き、TCPで元に戻されるまでを問題を解きながら見てみよう
           </Typography>
         </Box>
         <NetworkSimulator />
