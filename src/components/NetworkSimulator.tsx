@@ -1,8 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useState } from "react";
 import Box from "@mui/material/Box";
-import IconButton from "@mui/material/IconButton";
-import Slider from "@mui/material/Slider";
+import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
@@ -12,7 +11,7 @@ import Typography from "@mui/material/Typography";
 import { keyframes } from "@mui/material/styles";
 import NavigateBeforeIcon from "@mui/icons-material/NavigateBefore";
 import NavigateNextIcon from "@mui/icons-material/NavigateNext";
-import SkipPreviousIcon from "@mui/icons-material/SkipPrevious";
+import ReplayIcon from "@mui/icons-material/Replay";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
 // ---------- モデル ----------
@@ -701,112 +700,104 @@ function senderOf(phase: Phase): Side {
   return phase === "request" ? "client" : "server";
 }
 
-// ---------- プレイヤー（操作バー） ----------
+// ---------- スライド送り（操作バー） ----------
 
 const REPLY_START = STEPS.findIndex((s) => s.phase === "response");
 
-interface PlayerProps {
+const slideFromRight = keyframes`
+  from { opacity: 0; transform: translateX(40px); }
+  to   { opacity: 1; transform: translateX(0); }
+`;
+const slideFromLeft = keyframes`
+  from { opacity: 0; transform: translateX(-40px); }
+  to   { opacity: 1; transform: translateX(0); }
+`;
+
+interface SlideNavProps {
   index: number;
   onSeek: (index: number) => void;
 }
 
-function PlayerBar({ index, onSeek }: PlayerProps) {
-  const step = STEPS[index];
+function SlideNav({ index, onSeek }: SlideNavProps) {
+  const isFirst = index === 0;
   const isLast = index === STEPS.length - 1;
-  const split = (REPLY_START / (STEPS.length - 1)) * 100;
-  const iconSx = { color: "#fff", "&.Mui-disabled": { color: "rgba(255,255,255,0.3)" } };
+  const navButtonSx = { minWidth: 0, px: { xs: 1.5, sm: 2.5 }, py: 1, fontWeight: 700, borderRadius: 2, whiteSpace: "nowrap" };
 
   return (
-    <Box
+    <Paper
+      elevation={6}
       sx={{
         position: "sticky",
         bottom: { xs: 8, sm: 12 },
         zIndex: 10,
-        bgcolor: "#1d2330",
-        color: "#fff",
         borderRadius: 3,
-        boxShadow: 8,
-        px: { xs: 1.5, sm: 2.5 },
-        pt: 0.5,
-        pb: 0.5,
+        px: { xs: 1, sm: 2 },
+        py: 1,
       }}
     >
-      {/* シークバー */}
-      <Stack direction="row" alignItems="center" spacing={1.5}>
-        <Typography sx={{ fontSize: "0.75rem", fontVariantNumeric: "tabular-nums", minWidth: 44, opacity: 0.8 }}>
-          {index + 1} / {STEPS.length}
-        </Typography>
-        <Slider
-          aria-label="ステップ"
-          value={index + 1}
-          min={1}
-          max={STEPS.length}
-          step={1}
-          marks
-          onChange={(_, v) => onSeek((v as number) - 1)}
-          sx={{
-            color: step.phase === "request" ? "#64b5f6" : "#ce93d8",
-            height: 6,
-            py: 1,
-            "& .MuiSlider-rail": {
-              opacity: 1,
-              background: `linear-gradient(90deg, rgba(100,181,246,0.35) 0 ${split}%, rgba(206,147,216,0.35) ${split}% 100%)`,
-            },
-            "& .MuiSlider-mark": { bgcolor: "rgba(255,255,255,0.5)", width: 2, height: 6 },
-            "& .MuiSlider-thumb": { width: 16, height: 16, bgcolor: "#fff" },
-          }}
-        />
-      </Stack>
-      <Box sx={{ position: "relative", height: 16, ml: { xs: "56px", sm: "60px" }, mt: -0.5 }}>
-        <Typography sx={{ position: "absolute", left: 0, fontSize: "0.65rem", color: "#90caf9", whiteSpace: "nowrap" }}>
-          ① 画像をアップロード
-        </Typography>
-        <Typography sx={{ position: "absolute", left: `${split}%`, fontSize: "0.65rem", color: "#e1bee7", whiteSpace: "nowrap" }}>
-          ② 返事
-        </Typography>
-      </Box>
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <Button
+          variant="outlined"
+          onClick={() => onSeek(index - 1)}
+          disabled={isFirst}
+          startIcon={<NavigateBeforeIcon />}
+          title="前のスライド（←キー）"
+          sx={navButtonSx}
+        >
+          前へ
+        </Button>
 
-      {/* ボタンとタイトル */}
-      <Stack direction="row" alignItems="center" spacing={{ xs: 0, sm: 0.5 }} mt={0.25}>
-        <IconButton aria-label="最初から" title="最初から" onClick={() => onSeek(0)} disabled={index === 0} sx={iconSx}>
-          <SkipPreviousIcon />
-        </IconButton>
-        <IconButton aria-label="戻る" title="戻る（←キー）" onClick={() => onSeek(index - 1)} disabled={index === 0} sx={iconSx}>
-          <NavigateBeforeIcon  />
-        </IconButton>
-        <IconButton
-          aria-label="次へ"
-          title="次へ（→キー）"
-          onClick={() => onSeek(index + 1)}
-          disabled={isLast}
-          size="small"
-          sx={{
-            bgcolor: "#fff",
-            color: "#1d2330",
-            mx: 0.5,
-            p: 0.75,
-            "&:hover": { bgcolor: "#e3e8ef" },
-            "&.Mui-disabled": { bgcolor: "rgba(255,255,255,0.3)", color: "rgba(29,35,48,0.5)" },
-          }}
-        >
-          <NavigateNextIcon  />
-        </IconButton>
-        <Typography
-          sx={{
-            flex: 1,
-            minWidth: 0,
-            ml: 1,
-            fontWeight: 700,
-            fontSize: { xs: "0.8rem", sm: "0.95rem" },
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {step.title}
-        </Typography>
+        <Stack flex={1} minWidth={0} alignItems="center" spacing={0.5}>
+          {/* スライド一覧（クリックでそのスライドへ） */}
+          <Stack direction="row" alignItems="center" justifyContent="center" sx={{ display: { xs: "none", sm: "flex" }, gap: 0.75 }}>
+            {STEPS.map((s, i) => {
+              const color = s.phase === "request" ? "#1e88e5" : "#8e24aa";
+              const current = i === index;
+              return (
+                <Box
+                  key={i}
+                  component="button"
+                  type="button"
+                  aria-label={`スライド ${i + 1}：${s.title}`}
+                  aria-current={current ? "step" : undefined}
+                  title={`${i + 1}. ${s.title}`}
+                  onClick={() => onSeek(i)}
+                  sx={{
+                    p: 0,
+                    border: 0,
+                    cursor: "pointer",
+                    width: current ? 22 : 10,
+                    height: 10,
+                    borderRadius: 5,
+                    bgcolor: color,
+                    opacity: current ? 1 : i < index ? 0.55 : 0.2,
+                    transition: "width 0.2s, opacity 0.2s",
+                    ml: i === REPLY_START ? 1.5 : 0,
+                    "&:hover": { opacity: current ? 1 : 0.8 },
+                  }}
+                />
+              );
+            })}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums", lineHeight: 1.2 }}>
+            スライド {index + 1} / {STEPS.length}
+            <Box component="span" sx={{ display: { xs: "none", md: "inline" } }}>
+              　·　画面をクリックしても次へ進みます
+            </Box>
+          </Typography>
+        </Stack>
+
+        {isLast ? (
+          <Button variant="contained" onClick={() => onSeek(0)} startIcon={<ReplayIcon />} sx={navButtonSx}>
+            最初から
+          </Button>
+        ) : (
+          <Button variant="contained" onClick={() => onSeek(index + 1)} endIcon={<NavigateNextIcon />} title="次のスライド（→キー）" sx={navButtonSx}>
+            次へ
+          </Button>
+        )}
       </Stack>
-    </Box>
+    </Paper>
   );
 }
 
@@ -815,26 +806,44 @@ function PlayerBar({ index, onSeek }: PlayerProps) {
 export default function NetworkSimulator() {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState(0);
+  const [direction, setDirection] = useState<1 | -1>(1);
 
   const step = STEPS[index];
   const unit = step.units[Math.min(selected, step.units.length - 1)];
 
   const go = (next: number) => {
-    setIndex(Math.max(0, Math.min(STEPS.length - 1, next)));
+    const clamped = Math.max(0, Math.min(STEPS.length - 1, next));
+    if (clamped === index) return;
+    setDirection(clamped > index ? 1 : -1);
+    setIndex(clamped);
     setSelected(0);
   };
 
+  // パワーポイントと同じキー操作でスライドを送る
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [role=slider]")) return;
-      if (e.key === "ArrowRight") setIndex((i) => Math.min(STEPS.length - 1, i + 1));
-      else if (e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
+      if (e.target instanceof HTMLElement && e.target.closest("input, textarea")) return;
+      const onButton = e.target instanceof HTMLElement && e.target.closest("button");
+      let next: number;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "PageDown") next = index + 1;
+      else if ((e.key === " " || e.key === "Enter") && !onButton) next = index + 1;
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Backspace") next = index - 1;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = STEPS.length - 1;
       else return;
-      setSelected(0);
+      e.preventDefault();
+      go(next);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  });
+
+  // スライド部分をクリック・タップすると次へ（ボタンなど操作できる部品は除く）
+  const advanceOnClick = (e: MouseEvent) => {
+    if (e.target instanceof HTMLElement && e.target.closest("button, a, input, [role=button]")) return;
+    if (window.getSelection()?.toString()) return;
+    go(index + 1);
+  };
 
   const location =
     step.where === "wire"
@@ -844,9 +853,13 @@ export default function NetworkSimulator() {
 
   return (
     <Stack spacing={2}>
-      {/* 全体図と説明（横並び） */}
+      {/* 全体図と説明（横並び）＝ 1枚のスライド */}
       <Box
+        key={index}
+        onClick={advanceOnClick}
         sx={{
+          cursor: index < STEPS.length - 1 ? "pointer" : "default",
+          animation: `${direction === 1 ? slideFromRight : slideFromLeft} 0.35s ease-out`,
           display: "grid",
           gridTemplateColumns: { xs: "1fr", md: "minmax(0, 1.15fr) minmax(0, 1fr)" },
           gap: 2,
@@ -1010,7 +1023,7 @@ export default function NetworkSimulator() {
         </CardContent>
       </Card>
 
-      <PlayerBar index={index} onSeek={go} />
+      <SlideNav index={index} onSeek={go} />
     </Stack>
   );
 }
