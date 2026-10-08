@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
 import Box from "@mui/material/Box";
-import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Slider from "@mui/material/Slider";
 import Card from "@mui/material/Card";
@@ -13,9 +12,6 @@ import Typography from "@mui/material/Typography";
 import { keyframes } from "@mui/material/styles";
 import NavigateBeforeIcon from "@mui/icons-material/NavigateBefore";
 import NavigateNextIcon from "@mui/icons-material/NavigateNext";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import PauseIcon from "@mui/icons-material/Pause";
-import ReplayIcon from "@mui/icons-material/Replay";
 import SkipPreviousIcon from "@mui/icons-material/SkipPrevious";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
@@ -707,20 +703,14 @@ function senderOf(phase: Phase): Side {
 
 // ---------- プレイヤー（操作バー） ----------
 
-const SPEEDS = [0.5, 1, 2] as const;
-const BASE_INTERVAL = 4000;
 const REPLY_START = STEPS.findIndex((s) => s.phase === "response");
 
 interface PlayerProps {
   index: number;
-  playing: boolean;
-  speed: number;
   onSeek: (index: number) => void;
-  onTogglePlay: () => void;
-  onSpeed: () => void;
 }
 
-function PlayerBar({ index, playing, speed, onSeek, onTogglePlay, onSpeed }: PlayerProps) {
+function PlayerBar({ index, onSeek }: PlayerProps) {
   const step = STEPS[index];
   const isLast = index === STEPS.length - 1;
   const split = (REPLY_START / (STEPS.length - 1)) * 100;
@@ -785,15 +775,20 @@ function PlayerBar({ index, playing, speed, onSeek, onTogglePlay, onSpeed }: Pla
           <NavigateBeforeIcon  />
         </IconButton>
         <IconButton
-          aria-label={playing ? "一時停止" : "自動再生"}
-          title={playing ? "一時停止" : isLast ? "もう一度再生" : "自動再生"}
-          onClick={onTogglePlay}
+          aria-label="次へ"
+          title="次へ（→キー）"
+          onClick={() => onSeek(index + 1)}
+          disabled={isLast}
           size="small"
-          sx={{ bgcolor: "#fff", color: "#1d2330", mx: 0.5, p: 0.75, "&:hover": { bgcolor: "#e3e8ef" } }}
+          sx={{
+            bgcolor: "#fff",
+            color: "#1d2330",
+            mx: 0.5,
+            p: 0.75,
+            "&:hover": { bgcolor: "#e3e8ef" },
+            "&.Mui-disabled": { bgcolor: "rgba(255,255,255,0.3)", color: "rgba(29,35,48,0.5)" },
+          }}
         >
-          {playing ? <PauseIcon  /> : isLast ? <ReplayIcon  /> : <PlayArrowIcon  />}
-        </IconButton>
-        <IconButton aria-label="次へ" title="次へ（→キー）" onClick={() => onSeek(index + 1)} disabled={isLast} sx={iconSx}>
           <NavigateNextIcon  />
         </IconButton>
         <Typography
@@ -810,14 +805,6 @@ function PlayerBar({ index, playing, speed, onSeek, onTogglePlay, onSpeed }: Pla
         >
           {step.title}
         </Typography>
-        <Button
-          size="small"
-          onClick={onSpeed}
-          title="自動再生の速さ"
-          sx={{ color: "#fff", border: "1px solid rgba(255,255,255,0.4)", minWidth: 0, px: 1, textTransform: "none", fontVariantNumeric: "tabular-nums" }}
-        >
-          {speed}x
-        </Button>
       </Stack>
     </Box>
   );
@@ -827,12 +814,9 @@ function PlayerBar({ index, playing, speed, onSeek, onTogglePlay, onSpeed }: Pla
 
 export default function NetworkSimulator() {
   const [index, setIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [selected, setSelected] = useState(0);
-  const [speed, setSpeed] = useState<number>(1);
 
   const step = STEPS[index];
-  const isLast = index === STEPS.length - 1;
   const unit = step.units[Math.min(selected, step.units.length - 1)];
 
   const go = (next: number) => {
@@ -841,23 +825,12 @@ export default function NetworkSimulator() {
   };
 
   useEffect(() => {
-    if (!playing || isLast) return;
-    const timer = setTimeout(() => {
-      setIndex(index + 1);
-      setSelected(0);
-      if (index + 1 === STEPS.length - 1) setPlaying(false);
-    }, BASE_INTERVAL / speed);
-    return () => clearTimeout(timer);
-  }, [playing, index, isLast, speed]);
-
-  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [role=slider]")) return;
       if (e.key === "ArrowRight") setIndex((i) => Math.min(STEPS.length - 1, i + 1));
       else if (e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
       else return;
       setSelected(0);
-      setPlaying(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1037,20 +1010,7 @@ export default function NetworkSimulator() {
         </CardContent>
       </Card>
 
-      <PlayerBar
-        index={index}
-        playing={playing}
-        speed={speed}
-        onSeek={(i) => {
-          setPlaying(false);
-          go(i);
-        }}
-        onTogglePlay={() => {
-          if (isLast) go(0);
-          setPlaying((p) => !p);
-        }}
-        onSpeed={() => setSpeed((v) => SPEEDS[(SPEEDS.indexOf(v as (typeof SPEEDS)[number]) + 1) % SPEEDS.length])}
-      />
+      <PlayerBar index={index} onSeek={go} />
     </Stack>
   );
 }
