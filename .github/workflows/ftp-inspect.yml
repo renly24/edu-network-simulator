@@ -61,6 +61,9 @@ jobs:
           getent hosts ftp.gmaobb.jp || echo "::warning::ftp.gmaobb.jp did not resolve"
           echo "--- DNS lookup of FTP_HOST ---"
           getent hosts "$FTP_HOST" >/dev/null && echo "FTP_HOST resolves" || echo "::warning::FTP_HOST did not resolve"
+          echo "--- DNS records of gmaobb.jp ---"
+          for t in NS SOA A MX; do echo "$t: $(dig +short gmaobb.jp $t | tr '\n' ' ')"; done
+          echo "status: $(dig gmaobb.jp | grep -o 'status: [A-Z]*')"
 
       - name: Install lftp
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
@@ -70,9 +73,10 @@ jobs:
         run: |
           try() {
             # -c は最後のコマンドの終了コードを返す。cls で実際にログインさせる
-            lftp -u "$FTP_USER" --env-password "$FTP_HOST" -c "
+            lftp -c "
               set net:timeout 15; set net:max-retries 1;
               $1
+              open --env-password -u '$FTP_USER' '$FTP_HOST';
               cls -1 >/dev/null"
           }
           if try "set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate yes;"; then
@@ -98,9 +102,10 @@ jobs:
             ftps-noverify) opts="set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate no;" ;;
             plain)         opts="set ftp:ssl-allow no;" ;;
           esac
-          lftp -u "$FTP_USER" --env-password "$FTP_HOST" -c "
+          lftp -c "
             set net:timeout 15; set net:max-retries 1;
             $opts
+            open --env-password -u '$FTP_USER' '$FTP_HOST';
             echo '=== login directory ==='; pwd;
             echo '=== server features (FEAT) ==='; quote FEAT;
             echo '=== / ==='; cls -la /;
