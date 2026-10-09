@@ -65,6 +65,17 @@ jobs:
           for t in NS SOA A MX; do echo "$t: $(dig +short gmaobb.jp $t | tr '\n' ' ')"; done
           echo "status: $(dig gmaobb.jp | grep -o 'status: [A-Z]*')"
 
+      - name: Check public URL mapping
+        run: |
+          base=http://e.gmobb.jp/omaesensei
+          for path in / /digital/ /digital/BindecComplementGame/ /digital/edu-network-simulator/; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$base$path")
+            echo "$code $base$path"
+          done
+          echo "--- asset paths referenced by BindecComplementGame ---"
+          curl -s --max-time 15 "$base/digital/BindecComplementGame/" \
+            | grep -oE '"/[^"]*/_next/' | sort -u || true
+
       - name: Install lftp
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
 
