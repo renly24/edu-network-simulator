@@ -44,6 +44,24 @@ jobs:
           fi
           echo "All secrets are set."
 
+      - name: Diagnose FTP_HOST format
+        run: |
+          # 値そのものは表示せず、よくある入力ミスだけを確認する
+          echo "length: ${#FTP_HOST}"
+          [[ "$FTP_HOST" =~ [[:space:]] ]] && echo "::warning::FTP_HOST contains whitespace or a newline"
+          [[ "$FTP_HOST" == *"://"* ]] && echo "::warning::FTP_HOST contains a scheme such as ftp://"
+          [[ "$FTP_HOST" == */* ]] && echo "::warning::FTP_HOST contains a slash (path)"
+          [[ "$FTP_HOST" == *:* ]] && echo "::warning::FTP_HOST contains a colon (port)"
+          if [ "$FTP_HOST" = "ftp.gmaobb.jp" ]; then
+            echo "FTP_HOST equals ftp.gmaobb.jp"
+          else
+            echo "::warning::FTP_HOST is not exactly ftp.gmaobb.jp"
+          fi
+          echo "--- DNS lookup of ftp.gmaobb.jp ---"
+          getent hosts ftp.gmaobb.jp || echo "::warning::ftp.gmaobb.jp did not resolve"
+          echo "--- DNS lookup of FTP_HOST ---"
+          getent hosts "$FTP_HOST" >/dev/null && echo "FTP_HOST resolves" || echo "::warning::FTP_HOST did not resolve"
+
       - name: Install lftp
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
 
@@ -51,10 +69,11 @@ jobs:
         id: tls
         run: |
           try() {
-            lftp -u "$FTP_USER" --env-password "$FTP_HOST" -e "
+            # -c は最後のコマンドの終了コードを返す。cls で実際にログインさせる
+            lftp -u "$FTP_USER" --env-password "$FTP_HOST" -c "
               set net:timeout 15; set net:max-retries 1;
               $1
-              pwd; quit" >/dev/null 2>&1
+              cls -1 >/dev/null"
           }
           if try "set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate yes;"; then
             echo "mode=ftps" >> "$GITHUB_OUTPUT"
@@ -79,13 +98,12 @@ jobs:
             ftps-noverify) opts="set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate no;" ;;
             plain)         opts="set ftp:ssl-allow no;" ;;
           esac
-          lftp -u "$FTP_USER" --env-password "$FTP_HOST" -e "
-            set net:timeout 15; set net:max-retries 1; set cmd:fail-exit no;
+          lftp -u "$FTP_USER" --env-password "$FTP_HOST" -c "
+            set net:timeout 15; set net:max-retries 1;
             $opts
             echo '=== login directory ==='; pwd;
             echo '=== server features (FEAT) ==='; quote FEAT;
             echo '=== / ==='; cls -la /;
             echo '=== login directory ==='; cls -la;
             echo '=== digital (depth 1) ==='; find --maxdepth=1 digital;
-            echo '=== digital/$PROJECT_DIR ==='; cls -la digital/$PROJECT_DIR;
-            quit"
+            echo '=== digital/$PROJECT_DIR ==='; cls -la digital/$PROJECT_DIR"
