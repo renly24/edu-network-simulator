@@ -28,8 +28,6 @@ jobs:
       PROJECT_DIR: edu-network-simulator
       ALLOW_PLAIN: ${{ inputs.allow_plain || false }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Check secrets
         run: |
           missing=0
@@ -86,9 +84,11 @@ jobs:
           fi
 
       - name: Check pinned certificate login
-        # deploy-ftp.yml と同じ設定（指紋で固定した証明書だけを信頼）でログインできるか
+        # 共通デプロイ（edu-deploy-workflows）と同じ設定（指紋で固定した証明書だけを信頼）でログインできるか
         run: |
-          fp=$(grep -oP 'FTP_CERT_FINGERPRINT: "\K[^"]+' .github/workflows/deploy-ftp.yml)
+          fp=$(curl -fsSL https://raw.githubusercontent.com/renly24/edu-deploy-workflows/main/.github/workflows/ftp-deploy.yml \
+            | grep -oP 'FTP_CERT_FINGERPRINT: "\K[^"]+')
+          test -n "$fp"
           lftp -c "
             set net:timeout 15; set net:max-retries 1;
             set ftp:ssl-force yes; set ftp:ssl-protect-data yes;
