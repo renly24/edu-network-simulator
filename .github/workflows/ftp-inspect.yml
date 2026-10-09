@@ -1,0 +1,91 @@
+name: Inspect FTP server (read-only)
+
+# FTP サーバーの状況を確認するだけのワークフロー。
+# アップロード・削除・フォルダー作成は一切行わない。
+on:
+  push:
+    branches:
+      - "claude/vibrant-ritchie-cddvqa"
+    paths:
+      - ".github/workflows/ftp-inspect.yml"
+  workflow_dispatch:
+    inputs:
+      allow_plain:
+        description: "FTPS で接続できない場合に暗号化なしの FTP を試す（パスワードが平文で流れます）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      LFTP_PASSWORD: ${{ secrets.FTP_PASS }}
+      PROJECT_DIR: edu-network-simulator
+      ALLOW_PLAIN: ${{ inputs.allow_plain || false }}
+    steps:
+      - name: Check secrets
+        run: |
+          missing=0
+          for name in FTP_HOST FTP_USER LFTP_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "Repository secrets FTP_HOST / FTP_USER / FTP_PASS が読めません。"
+            echo "Environment secrets に登録した場合、このジョブからは参照できません。"
+            exit 1
+          fi
+          echo "All secrets are set."
+
+      - name: Install lftp
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
+
+      - name: Check FTPS support
+        id: tls
+        run: |
+          try() {
+            lftp -u "$FTP_USER" --env-password "$FTP_HOST" -e "
+              set net:timeout 15; set net:max-retries 1;
+              $1
+              pwd; quit" >/dev/null 2>&1
+          }
+          if try "set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate yes;"; then
+            echo "mode=ftps" >> "$GITHUB_OUTPUT"
+            echo "FTPS (certificate verified): OK"
+          elif try "set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate no;"; then
+            echo "mode=ftps-noverify" >> "$GITHUB_OUTPUT"
+            echo "FTPS (certificate NOT verified): OK"
+          elif [ "$ALLOW_PLAIN" = "true" ] && try "set ftp:ssl-allow no;"; then
+            echo "mode=plain" >> "$GITHUB_OUTPUT"
+            echo "Plain FTP (no encryption): OK"
+          else
+            echo "::error::Could not log in with FTPS. Plain FTP was not tried (allow_plain=$ALLOW_PLAIN)."
+            exit 1
+          fi
+
+      - name: List server contents
+        env:
+          MODE: ${{ steps.tls.outputs.mode }}
+        run: |
+          case "$MODE" in
+            ftps)          opts="set ftp:ssl-force yes; set ftp:ssl-protect-data yes;" ;;
+            ftps-noverify) opts="set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate no;" ;;
+            plain)         opts="set ftp:ssl-allow no;" ;;
+          esac
+          lftp -u "$FTP_USER" --env-password "$FTP_HOST" -e "
+            set net:timeout 15; set net:max-retries 1; set cmd:fail-exit no;
+            $opts
+            echo '=== login directory ==='; pwd;
+            echo '=== server features (FEAT) ==='; quote FEAT;
+            echo '=== / ==='; cls -la /;
+            echo '=== login directory ==='; cls -la;
+            echo '=== digital (depth 1) ==='; find --maxdepth=1 digital;
+            echo '=== digital/$PROJECT_DIR ==='; cls -la digital/$PROJECT_DIR;
+            quit"
