@@ -28,6 +28,8 @@ jobs:
       PROJECT_DIR: edu-network-simulator
       ALLOW_PLAIN: ${{ inputs.allow_plain || false }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check secrets
         run: |
           missing=0
@@ -43,27 +45,6 @@ jobs:
             exit 1
           fi
           echo "All secrets are set."
-
-      - name: Diagnose FTP_HOST format
-        run: |
-          # 値そのものは表示せず、よくある入力ミスだけを確認する
-          echo "length: ${#FTP_HOST}"
-          [[ "$FTP_HOST" =~ [[:space:]] ]] && echo "::warning::FTP_HOST contains whitespace or a newline"
-          [[ "$FTP_HOST" == *"://"* ]] && echo "::warning::FTP_HOST contains a scheme such as ftp://"
-          [[ "$FTP_HOST" == */* ]] && echo "::warning::FTP_HOST contains a slash (path)"
-          [[ "$FTP_HOST" == *:* ]] && echo "::warning::FTP_HOST contains a colon (port)"
-          if [ "$FTP_HOST" = "ftp.gmaobb.jp" ]; then
-            echo "FTP_HOST equals ftp.gmaobb.jp"
-          else
-            echo "::warning::FTP_HOST is not exactly ftp.gmaobb.jp"
-          fi
-          echo "--- DNS lookup of ftp.gmaobb.jp ---"
-          getent hosts ftp.gmaobb.jp || echo "::warning::ftp.gmaobb.jp did not resolve"
-          echo "--- DNS lookup of FTP_HOST ---"
-          getent hosts "$FTP_HOST" >/dev/null && echo "FTP_HOST resolves" || echo "::warning::FTP_HOST did not resolve"
-          echo "--- DNS records of gmaobb.jp ---"
-          for t in NS SOA A MX; do echo "$t: $(dig +short gmaobb.jp $t | tr '\n' ' ')"; done
-          echo "status: $(dig gmaobb.jp | grep -o 'status: [A-Z]*')"
 
       - name: Check public URL mapping
         run: |
@@ -103,6 +84,18 @@ jobs:
             echo "::error::Could not log in with FTPS. Plain FTP was not tried (allow_plain=$ALLOW_PLAIN)."
             exit 1
           fi
+
+      - name: Check pinned certificate login
+        # deploy-ftp.yml と同じ設定（指紋で固定した証明書だけを信頼）でログインできるか
+        run: |
+          fp=$(grep -oP 'FTP_CERT_FINGERPRINT: "\K[^"]+' .github/workflows/deploy-ftp.yml)
+          lftp -c "
+            set net:timeout 15; set net:max-retries 1;
+            set ftp:ssl-force yes; set ftp:ssl-protect-data yes;
+            set ssl:verify-certificate yes;
+            set ssl:verify-certificate/$fp no;
+            open --env-password -u '$FTP_USER' '$FTP_HOST';
+            cls -1 >/dev/null" && echo "Pinned certificate login: OK"
 
       - name: List server contents
         env:
