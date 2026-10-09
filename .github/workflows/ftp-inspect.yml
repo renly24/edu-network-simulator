@@ -110,5 +110,6 @@ jobs:
             echo '=== server features (FEAT) ==='; quote FEAT;
             echo '=== / ==='; cls -la /;
             echo '=== login directory ==='; cls -la;
-            echo '=== digital (depth 1) ==='; find --maxdepth=1 digital;
-            echo '=== digital/$PROJECT_DIR ==='; cls -la digital/$PROJECT_DIR"
+            echo '=== digital ==='; cls -la digital/;
+            echo '=== digital/$PROJECT_DIR ==='; cls -la digital/$PROJECT_DIR/;
+            echo '=== done ==='"
