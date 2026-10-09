@@ -43,6 +43,10 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: ${{ env.BASE_PATH }}
 
+      # FTP サーバーは名前に ".." を含むファイルを受け付けないので、改名して参照も直す
+      - name: Rename files the FTP server rejects
+        run: node scripts/sanitize-export.mjs out
+
       - name: Install lftp
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
 
